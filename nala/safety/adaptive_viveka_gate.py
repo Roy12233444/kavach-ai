@@ -10,11 +10,14 @@ import logging
 from typing import Dict, Any, Optional, List, Tuple
 from enum import Enum
 
-# Import OperationMode from fleet coordinator
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
-from fleet.coordinator import OperationMode
+# OperationMode definition (self-contained with fallback)
+try:
+    from fleet.coordinator import OperationMode
+except ImportError:
+    class OperationMode(str, Enum):
+        """Stable externally meaningful operation modes."""
+        AUTONOMOUS = "AUTONOMOUS"
+        INTERACTIVE = "INTERACTIVE"
 
 logger = logging.getLogger(__name__)
 

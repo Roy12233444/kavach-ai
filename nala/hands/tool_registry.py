@@ -48,7 +48,6 @@ class ToolMetadata:
 
     # Safety and reliability
     safety_level: str = "medium"  # low, medium, high, critical
-    requires_sandbox": "medium"  # low, medium, high, critical
     requires_sandbox: bool = False
     side_effects: bool = False  # Whether tool modifies external state
     deterministic: bool = True  # Whether tool produces same output for same input
