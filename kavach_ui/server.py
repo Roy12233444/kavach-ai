@@ -717,6 +717,33 @@ async def serve_jury_mobile() -> FileResponse:
     return FileResponse(target, headers={"Cache-Control": "no-store"})
 
 
+@app.get("/favicon.svg", include_in_schema=False)
+async def serve_favicon_svg() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "favicon.svg",
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/favicon.png", include_in_schema=False)
+async def serve_favicon_png() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "favicon.png",
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def serve_favicon_ico() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "favicon.ico",
+        media_type="image/x-icon",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 # ---------------------------------------------------------------------------
 # REST API Endpoints
 # ---------------------------------------------------------------------------

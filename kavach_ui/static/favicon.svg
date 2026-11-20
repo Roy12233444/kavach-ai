@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="KAVACH AI Shield Logo">
+  <defs>
+    <linearGradient id="kavachGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E40AF" />
+      <stop offset="55%" stop-color="#2563EB" />
+      <stop offset="100%" stop-color="#1D4ED8" />
+    </linearGradient>
+    <linearGradient id="kavachSheen" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.22" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0.0" />
+    </linearGradient>
+  </defs>
+  <!-- Royal-blue armor badge -->
+  <rect x="2" y="2" width="60" height="60" rx="15" fill="url(#kavachGrad)" />
+  <rect x="2.75" y="2.75" width="58.5" height="58.5" rx="14.25" fill="url(#kavachSheen)" stroke="#60A5FA" stroke-opacity="0.45" stroke-width="1.5" />
+  <!-- White geometric armor shield -->
+  <path
+    d="M32 11.5 L49 18.2 V31.4 C49 42.1 41.6 49.4 32 52.8 C22.4 49.4 15 42.1 15 31.4 V18.2 Z"
+    fill="#FFFFFF"
+    fill-opacity="0.12"
+    stroke="#FFFFFF"
+    stroke-width="3.6"
+    stroke-linejoin="round"
+  />
+  <!-- Emerald + crisp white inner verification check -->
+  <path
+    d="M24.2 32.4 L29.6 37.8 L40.6 25.8"
+    fill="none"
+    stroke="#34D399"
+    stroke-width="4.4"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M24.2 32.4 L29.6 37.8 L40.6 25.8"
+    fill="none"
+    stroke="#FFFFFF"
+    stroke-width="2.1"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>
