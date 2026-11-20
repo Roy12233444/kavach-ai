@@ -1,0 +1,24 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Temporary databases & logs
+*.log
+*.sqlite
+*.wal
+core_banking.db
+
+# Environment variables
+.env
+.env.local
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
