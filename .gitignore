@@ -22,3 +22,7 @@ core_banking.db
 .vscode/
 .idea/
 *.swp
+
+# Frontend Node dependencies
+node_modules/
+kavach_ui/frontend/node_modules/

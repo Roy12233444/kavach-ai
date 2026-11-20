@@ -24,9 +24,9 @@ from dataclasses import dataclass, field
 from enum import Enum, IntEnum, auto
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
-# Import NALA components
+# Import KAVACH components
 try:
-    from core.hands.tool_registry import (
+    from kavach.hands.tool_registry import (
         get_tool_registry,
         get_tool,
         get_tool_instance,
@@ -34,27 +34,40 @@ try:
         ToolMetadata
     )
 except ImportError:
-    # Fallback for testing
-    def get_tool_registry():
-        return None
-    def get_tool(name):
-        return None
-    def get_tool_instance(name):
-        return None
-    def update_tool_usage(tool_name, success, latency):
-        pass
-    ToolMetadata = None
+    try:
+        from .tool_registry import (
+            get_tool_registry,
+            get_tool,
+            get_tool_instance,
+            update_tool_usage,
+            ToolMetadata
+        )
+    except ImportError:
+        # Fallback for testing
+        def get_tool_registry():
+            return None
+        def get_tool(name):
+            return None
+        def get_tool_instance(name):
+            return None
+        def update_tool_usage(tool_name, success, latency):
+            pass
+        ToolMetadata = None
 
 # Try to import sandbox manager
 try:
-    from core.hands.sandbox import execute_in_sandbox, is_seccomp_available
+    from kavach.hands.sandbox import execute_in_sandbox, is_seccomp_available
     SANDBOX_AVAILABLE = True
 except ImportError:
-    SANDBOX_AVAILABLE = False
-    def execute_in_sandbox(*args, **kwargs):
-        raise RuntimeError("Sandbox manager not available")
-    def is_seccomp_available():
-        return False
+    try:
+        from .sandbox import execute_in_sandbox, is_seccomp_available
+        SANDBOX_AVAILABLE = True
+    except ImportError:
+        SANDBOX_AVAILABLE = False
+        def execute_in_sandbox(*args, **kwargs):
+            raise RuntimeError("Sandbox manager not available")
+        def is_seccomp_available():
+            return False
 
 logger = logging.getLogger(__name__)
 
