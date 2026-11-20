@@ -5,6 +5,7 @@ import type {
   BankingStatus,
   CheckResponse,
   DiskStatus,
+  FinOpsState,
   LiveSyncEvent,
   ProofCompareResponse,
   ProtoStatusResponse,
@@ -20,6 +21,8 @@ import { TopNav } from "./components/TopNav";
 import { LiveShieldTab } from "./components/LiveShieldTab";
 import { PhysicalProofTab } from "./components/PhysicalProofTab";
 import { BeforeAfterTab } from "./components/BeforeAfterTab";
+import { RedTeamArenaTab } from "./components/RedTeamArenaTab";
+import { BigQueryFinOpsTab } from "./components/BigQueryFinOpsTab";
 import { LiveLogsTab } from "./components/LiveLogsTab";
 import { QrModal } from "./components/QrModal";
 import { MobileJuryPage } from "./components/MobileJuryPage";
@@ -37,6 +40,18 @@ const INITIAL_TRIPS: TripCounts = {
   R10_INDRA: 0,
   R6_VARUNA: 0,
   R2_YAMA: 0,
+  R5_DHARMA: 0,
+};
+
+const INITIAL_FINOPS: FinOpsState = {
+  budget_cap_usd: 5.0,
+  usd_per_tb: 6.25,
+  queries_governed: 0,
+  runaway_blocked: 0,
+  queries_approved: 0,
+  usd_saved_total: 0.0,
+  tb_prevented_total: 0.0,
+  recent_events: [],
 };
 
 const INITIAL_SCOREBOARD: Scoreboard = {
@@ -82,6 +97,7 @@ function DashboardShell() {
   const [banking, setBanking] = useState<BankingStatus | null>(null);
   const [tripCounts, setTripCounts] = useState<TripCounts>(INITIAL_TRIPS);
   const [scoreboard, setScoreboard] = useState<Scoreboard>(INITIAL_SCOREBOARD);
+  const [finops, setFinops] = useState<FinOpsState>(INITIAL_FINOPS);
   const [attackLog, setAttackLog] = useState<AttackLogItem[]>([]);
   const [wal, setWal] = useState<WalEntry[]>([]);
   const [lsn, setLsn] = useState(100);
@@ -166,6 +182,7 @@ function DashboardShell() {
     setWal(status.wal || []);
     setTripCounts(status.trip_counts || INITIAL_TRIPS);
     setScoreboard(status.scoreboard || INITIAL_SCOREBOARD);
+    if (status.finops) setFinops(status.finops);
     setAttackLog(dedupeAttackLog(status.attack_log || []));
     setKilledSessions(new Set(status.killed_sessions || []));
     setDisk(status.disk);
@@ -199,6 +216,7 @@ function DashboardShell() {
             if (msg.wal) setWal(msg.wal);
             if (msg.trip_counts) setTripCounts(msg.trip_counts);
             if (msg.scoreboard) setScoreboard(msg.scoreboard);
+            if (msg.finops) setFinops(msg.finops);
             if (msg.attack_log) setAttackLog(dedupeAttackLog(msg.attack_log));
             if (msg.killed_sessions)
               setKilledSessions(new Set(msg.killed_sessions));
@@ -211,6 +229,7 @@ function DashboardShell() {
             }
             if (msg.trip_counts) setTripCounts(msg.trip_counts);
             if (msg.scoreboard) setScoreboard(msg.scoreboard);
+            if (msg.finops) setFinops(msg.finops);
             if (msg.killed_sessions)
               setKilledSessions(new Set(msg.killed_sessions));
             if (msg.disk) setDisk(msg.disk);
@@ -242,15 +261,26 @@ function DashboardShell() {
                   setReplaySteps(msg.replay_steps);
                 }
               }
-              if (lc.verdict === "KILL" || lc.verdict === "WARN") {
+              if (
+                (lc.verdict === "KILL" || lc.verdict === "WARN") &&
+                lc.source !== "redteam_arena"
+              ) {
                 const isKill = lc.verdict === "KILL";
-                const srcBadge = lc.source === "mobile_jury" ? "MOBILE JURY · " : "";
+                const srcBadge =
+                  lc.source === "mobile_jury"
+                    ? "MOBILE JURY · "
+                    : lc.source === "finops_console"
+                    ? "FINOPS · "
+                    : "";
                 pushToast({
                   id: `chk_${lc.id}`,
                   level: isKill ? "critical" : "warn",
-                  title: isKill
-                    ? "HAZARDOUS COMMAND BLOCKED"
-                    : "SECURITY WARNING ISSUED",
+                  title:
+                    lc.rule === "R5_DHARMA"
+                      ? "RUNAWAY BIGQUERY COST BLOCKED"
+                      : isKill
+                      ? "HAZARDOUS COMMAND BLOCKED"
+                      : "SECURITY WARNING ISSUED",
                   badge: `${srcBadge}${lc.rule || lc.verdict}`,
                   message: lc.details,
                   meta: `${lc.latency_ms.toFixed(2)} ms · ${lc.text.slice(0, 65)}`,
@@ -426,12 +456,16 @@ function DashboardShell() {
         method: "POST",
       }).then((r) => r.json())) as {
         disk: DiskStatus;
+        banking?: BankingStatus;
         trip_counts: TripCounts;
         scoreboard: Scoreboard;
+        finops?: FinOpsState;
       };
       setDisk(res.disk);
+      if (res.banking) setBanking(res.banking);
       setTripCounts(res.trip_counts);
       setScoreboard(res.scoreboard);
+      setFinops(res.finops || INITIAL_FINOPS);
       setAttackLog([]);
       setKilledSessions(new Set());
       setLastResult(null);
@@ -497,6 +531,36 @@ function DashboardShell() {
             lastCompare={lastCompare}
             liveSync={liveSync}
             replaySteps={replaySteps}
+          />
+        )}
+
+        {activeTab === "redteam" && (
+          <RedTeamArenaTab
+            disk={disk}
+            banking={banking}
+            onRefreshIntegrity={(d, b) => {
+              setDisk(d);
+              setBanking(b);
+            }}
+            onArenaComplete={({ intercepted, total, medianMs, diskIntact }) => {
+              pushToast({
+                id: `arena_${Date.now()}`,
+                level: intercepted === total ? "info" : "critical",
+                title: "RED-TEAM ARENA BENCHMARK COMPLETE",
+                badge: `${intercepted}/${total} BLOCKED`,
+                message: `Intercepted ${intercepted} of ${total} live attacks (Median ${medianMs.toFixed(2)} ms). Host disk is ${diskIntact ? "100% intact (95 bytes)" : "modified"}.`,
+              });
+              if (desktopAlertsRef.current) {
+                playSecurityChime("info");
+              }
+            }}
+          />
+        )}
+
+        {activeTab === "finops" && (
+          <BigQueryFinOpsTab
+            finops={finops}
+            onFinopsUpdate={(next) => setFinops(next)}
           />
         )}
 

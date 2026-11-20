@@ -1,4 +1,4 @@
-export type TabKey = "shield" | "proof" | "compare" | "logs";
+export type TabKey = "shield" | "proof" | "compare" | "redteam" | "finops" | "logs";
 
 export type AgentRole =
   | "general_agent"
@@ -38,6 +38,7 @@ export interface TripCounts {
   R10_INDRA: number;
   R6_VARUNA: number;
   R2_YAMA: number;
+  R5_DHARMA: number;
   [key: string]: number;
 }
 
@@ -157,11 +158,101 @@ export interface ToastItem {
   meta?: string;
 }
 
+export interface RedTeamVector {
+  id: number;
+  code: string;
+  category: string;
+  title: string;
+  prompt: string;
+  agent_role: AgentRole | string;
+  session_id: string;
+  reset_before: boolean;
+  expected_rule: string;
+}
+
+export interface RedTeamRowResult {
+  id: number;
+  code: string;
+  category: string;
+  title: string;
+  prompt: string;
+  expected_rule: string;
+  status: "pending" | "running" | "done" | "error";
+  verdict?: VerdictType;
+  rule?: string | null;
+  stage?: string;
+  latency_ms?: number;
+  intercepted?: boolean;
+  details?: string;
+}
+
+export interface FinOpsTableMeta {
+  table_id: string;
+  dataset: string;
+  description: string;
+  total_tb: number;
+  column_count: number;
+  partition_column: string;
+  clustering_keys: string[];
+  row_count_approx: string;
+  safe_columns: string[];
+  full_scan_usd: number;
+}
+
+export interface FinOpsPreset {
+  id: string;
+  label: string;
+  tone: "safe" | "danger";
+  sql: string;
+}
+
+export interface FinOpsDecision {
+  is_bigquery_query: boolean;
+  verdict: VerdictType;
+  rule: string | null;
+  estimated_tb: number;
+  estimated_gb: number;
+  estimated_bytes: number;
+  estimated_cost_usd: number;
+  budget_cap_usd: number;
+  cost_saved_usd: number;
+  tables_matched: string[];
+  risk_factors: string[];
+  details: string;
+  safe_rewrite_sql: string | null;
+  rewrite_estimated_cost_usd: number | null;
+  latency_ms: number;
+}
+
+export interface FinOpsEventItem {
+  id: string;
+  timestamp: string;
+  sql: string;
+  verdict: VerdictType;
+  rule: string | null;
+  estimated_tb: number;
+  estimated_cost_usd: number;
+  budget_cap_usd: number;
+  latency_ms: number;
+}
+
+export interface FinOpsState {
+  budget_cap_usd: number;
+  usd_per_tb: number;
+  queries_governed: number;
+  runaway_blocked: number;
+  queries_approved: number;
+  usd_saved_total: number;
+  tb_prevented_total: number;
+  recent_events: FinOpsEventItem[];
+}
+
 export interface ProtoStatusResponse {
   engine: string;
   semantic_engine?: string;
   gemini_live?: boolean;
   host_watcher_active?: boolean;
+  cloud_ready?: boolean;
   mode: string;
   lan_ip: string;
   port: number;
@@ -169,6 +260,7 @@ export interface ProtoStatusResponse {
   lsn: number;
   trip_counts: TripCounts;
   scoreboard: Scoreboard;
+  finops?: FinOpsState;
   attack_log: AttackLogItem[];
   wal: WalEntry[];
   killed_sessions: string[];
@@ -183,6 +275,8 @@ export interface WsMessage {
   entry?: WalEntry;
   trip_counts?: TripCounts;
   scoreboard?: Scoreboard;
+  finops?: FinOpsState;
+  finops_decision?: FinOpsDecision;
   attack_log?: AttackLogItem[];
   killed_sessions?: string[];
   disk?: DiskStatus;

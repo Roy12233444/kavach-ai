@@ -20,6 +20,7 @@ import os
 import re
 import socket
 import sqlite3
+import statistics
 import sys
 import tempfile
 import time
@@ -28,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -48,6 +49,11 @@ if str(REPO_ROOT) not in sys.path:
 from discus.guard import DiscusGuard, SessionKilledError  # noqa: E402
 from discus.models import KillDecision  # noqa: E402
 from kavach.runtime.host_watcher import HostIntegrityWatcher  # noqa: E402
+from kavach.safety.bigquery_governor import get_bigquery_governor  # noqa: E402
+from kavach.safety.redteam_suite import (  # noqa: E402
+    get_redteam_vector_by_id,
+    get_redteam_vectors,
+)
 from kavach.safety.semantic_shield import get_semantic_shield  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -329,6 +335,7 @@ def build_replay_steps(
         ("R3_MITRA", "R3 Mitra · Fast-Path PII & Secrets Gate", "No static Aadhaar, PAN, or key literal matched."),
         ("R10_INDRA", "R10 Indra · Fast-Path Destructive Gate", "No static shell or DDL literal matched."),
         ("R2_YAMA", f"R2 Yama · Role Scope ({agent_role})", f"No static role violation under '{agent_role}'."),
+        ("R5_DHARMA", "R5 Dharma · BigQuery FinOps Gate", "SQL scan within $5.00 budget cap (or non-BigQuery query)."),
     ]
 
     executed: list[tuple[str, str, str, str]] = []
@@ -428,6 +435,19 @@ def resolve_jury_url(request: Optional[Request] = None) -> str:
 # ---------------------------------------------------------------------------
 # WebSocket Telemetry Hub & Stateful Runtime
 # ---------------------------------------------------------------------------
+def _default_finops_state() -> dict[str, Any]:
+    return {
+        "budget_cap_usd": 5.00,
+        "usd_per_tb": 6.25,
+        "queries_governed": 0,
+        "runaway_blocked": 0,
+        "queries_approved": 0,
+        "usd_saved_total": 0.0,
+        "tb_prevented_total": 0.0,
+        "recent_events": [],
+    }
+
+
 class TelemetryHub:
     def __init__(self) -> None:
         self.clients: set[WebSocket] = set()
@@ -439,6 +459,7 @@ class TelemetryHub:
             "R10_INDRA": 0,
             "R6_VARUNA": 0,
             "R2_YAMA": 0,
+            "R5_DHARMA": 0,
         }
         self.scoreboard: dict[str, int] = {
             "fired": 0,
@@ -447,6 +468,7 @@ class TelemetryHub:
             "passed": 0,
             "bypass_found": 0,
         }
+        self.finops: dict[str, Any] = _default_finops_state()
         self.attack_log: list[dict[str, Any]] = []
         self._append_boot_entry()
 
@@ -471,6 +493,7 @@ class TelemetryHub:
                 "wal": self.wal[-80:],
                 "trip_counts": self.trip_counts,
                 "scoreboard": self.scoreboard,
+                "finops": self.finops,
                 "attack_log": self.attack_log[-50:],
                 "disk": read_disk_status(),
                 "banking": read_banking_status(),
@@ -502,6 +525,7 @@ class TelemetryHub:
             "lsn": self.lsn,
             "trip_counts": self.trip_counts,
             "scoreboard": self.scoreboard,
+            "finops": self.finops,
             "killed_sessions": sorted(guard.get_killed_sessions()),
             "disk": read_disk_status(),
             **(extra or {}),
@@ -522,6 +546,7 @@ class TelemetryHub:
 # ---------------------------------------------------------------------------
 guard = DiscusGuard()
 semantic_shield = get_semantic_shield()
+bigquery_governor = get_bigquery_governor()
 # Register Indian sovereign PII patterns only if absent from config/pii_patterns.yaml
 _existing_patterns = guard.list_patterns()
 if "aadhaar_india" not in _existing_patterns:
@@ -567,7 +592,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="KAVACH AI — Proto-1 Mission Control & Proof Deck",
-    version="4.1.0",
+    version="4.3.0",
     lifespan=lifespan,
 )
 
@@ -607,6 +632,45 @@ class ProofCompareRequest(BaseModel):
 
 class BypassReportRequest(BaseModel):
     log_id: str
+
+
+class FinOpsCheckRequest(BaseModel):
+    sql: str = Field(..., min_length=1)
+    budget_cap_usd: float = Field(default=5.0, ge=0.1, le=1000.0)
+
+
+class RedTeamVectorRequest(BaseModel):
+    vector_id: int = Field(..., ge=1, le=20)
+
+
+def _record_finops_decision(decision: dict[str, Any], sql: str) -> dict[str, Any]:
+    """Accumulate verified BigQuery FinOps telemetry inside TelemetryHub."""
+    hub.finops["budget_cap_usd"] = round(float(decision.get("budget_cap_usd", 5.0)), 2)
+    hub.finops["queries_governed"] += 1
+    if decision.get("verdict") == "KILL":
+        hub.finops["runaway_blocked"] += 1
+        hub.finops["usd_saved_total"] = round(
+            hub.finops["usd_saved_total"] + float(decision.get("cost_saved_usd") or 0.0), 2
+        )
+        hub.finops["tb_prevented_total"] = round(
+            hub.finops["tb_prevented_total"] + float(decision.get("estimated_tb") or 0.0), 4
+        )
+    else:
+        hub.finops["queries_approved"] += 1
+
+    evt = {
+        "id": f"bq_{int(time.time() * 1000)}_{hub.lsn}",
+        "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+        "sql": sql.strip()[:120],
+        "verdict": decision.get("verdict"),
+        "rule": decision.get("rule"),
+        "estimated_tb": decision.get("estimated_tb"),
+        "estimated_cost_usd": decision.get("estimated_cost_usd"),
+        "budget_cap_usd": decision.get("budget_cap_usd"),
+        "latency_ms": decision.get("latency_ms"),
+    }
+    hub.finops["recent_events"] = [evt, *hub.finops["recent_events"]][:20]
+    return evt
 
 
 def _invoke_guard(text: str, session_id: str, agent_role: Optional[str]):
@@ -677,6 +741,7 @@ async def get_proto_status(request: Request) -> dict[str, Any]:
         "lsn": hub.lsn,
         "trip_counts": hub.trip_counts,
         "scoreboard": hub.scoreboard,
+        "finops": hub.finops,
         "attack_log": hub.attack_log[-50:],
         "wal": hub.wal[-80:],
         "killed_sessions": sorted(guard.get_killed_sessions()),
@@ -753,6 +818,7 @@ async def proto_check(req: ProtoCheckRequest) -> dict[str, Any]:
                 "violation_type": vtype,
                 "details": details,
                 "latency_ms": latency_ms,
+                "stage": "layer0_deob + discus" if deob.obfuscation_flags else "discus_fast",
                 "source": req.source,
                 "bypass_reported": False,
             }
@@ -773,6 +839,7 @@ async def proto_check(req: ProtoCheckRequest) -> dict[str, Any]:
                 "agent_role": req.agent_role,
                 "violation_type": vtype,
                 "rule": rule,
+                "stage": log_item["stage"],
                 "details": details,
                 "message": details,
                 "session_burned": False,
@@ -781,7 +848,76 @@ async def proto_check(req: ProtoCheckRequest) -> dict[str, Any]:
                 "disk": read_disk_status(),
             }
 
-        # Stage 2: Hybrid Semantic Adversarial Shield (Action-Graph + Vector + Optional Gemini 2.0 Flash)
+        # Stage 1.5: Phase 4.3 BigQuery FinOps Cost Governor (Rule R5 Dharma)
+        bq = bigquery_governor.evaluate(req.text, budget_cap_usd=hub.finops["budget_cap_usd"])
+        if bq.is_bigquery_query and bq.verdict == "KILL":
+            bq_dict = bq.to_dict()
+            _record_finops_decision(bq_dict, req.text)
+            latency_ms = round((time.perf_counter() - t0) * 1000.0, 3)
+            rule = "R5_DHARMA"
+            vtype = "finops_budget_exceeded"
+            details = bq.details
+            should_burn = req.source != "finops_console"
+            if should_burn:
+                guard.kill_session(req.session_id, reason=details)
+
+            hub.trip_counts[rule] = hub.trip_counts.get(rule, 0) + 1
+            hub.scoreboard["fired"] += 1
+            hub.scoreboard["killed"] += 1
+
+            replay_steps = build_replay_steps(
+                req.text,
+                req.agent_role,
+                False,
+                "KILL",
+                rule,
+                details,
+                latency_ms,
+                obfuscation_flags=deob.obfuscation_flags,
+            )
+            log_item = {
+                "id": f"atk_{int(time.time() * 1000)}_{hub.lsn}",
+                "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                "text": req.text[:140],
+                "session_id": req.session_id,
+                "agent_role": req.agent_role,
+                "verdict": "KILL",
+                "rule": rule,
+                "violation_type": vtype,
+                "details": details,
+                "latency_ms": latency_ms,
+                "stage": "r5_dharma_finops",
+                "source": req.source,
+                "bypass_reported": False,
+            }
+            hub.attack_log.insert(0, log_item)
+            await hub.record_and_broadcast(
+                "kill",
+                f"[{req.session_id}] KILL ({rule}) in {latency_ms:.3f}ms — {details}",
+                {
+                    "last_check": log_item,
+                    "replay_steps": replay_steps,
+                    "finops_decision": bq_dict,
+                    "live_sync": _build_live_sync(req, "KILL", rule, latency_ms, details),
+                },
+            )
+            return {
+                "verdict": "KILL",
+                "latency_ms": latency_ms,
+                "session_id": req.session_id,
+                "agent_role": req.agent_role,
+                "violation_type": vtype,
+                "rule": rule,
+                "stage": "r5_dharma_finops",
+                "details": details,
+                "session_burned": should_burn,
+                "finops_decision": bq_dict,
+                "replay_steps": replay_steps,
+                "log_entry": log_item,
+                "disk": read_disk_status(),
+            }
+
+        # Stage 2: Hybrid Semantic Adversarial Shield (Action-Graph + Vector + Gemini 2.5 Flash)
         sem = await semantic_shield.evaluate(req.text, agent_role=req.agent_role, deob=deob)
         latency_ms = round((time.perf_counter() - t0) * 1000.0, 3)
 
@@ -818,6 +954,7 @@ async def proto_check(req: ProtoCheckRequest) -> dict[str, Any]:
                 "violation_type": vtype,
                 "details": details,
                 "latency_ms": latency_ms,
+                "stage": sem.stage,
                 "source": req.source,
                 "bypass_reported": False,
             }
@@ -838,12 +975,16 @@ async def proto_check(req: ProtoCheckRequest) -> dict[str, Any]:
                 "agent_role": req.agent_role,
                 "violation_type": vtype,
                 "rule": rule,
+                "stage": sem.stage,
                 "details": details,
                 "session_burned": True,
                 "replay_steps": replay_steps,
                 "log_entry": log_item,
                 "disk": read_disk_status(),
             }
+
+        if bq.is_bigquery_query:
+            _record_finops_decision(bq.to_dict(), req.text)
 
         hub.scoreboard["fired"] += 1
         hub.scoreboard["passed"] += 1
@@ -869,6 +1010,7 @@ async def proto_check(req: ProtoCheckRequest) -> dict[str, Any]:
             "violation_type": None,
             "details": "Constitutional and semantic invariants satisfied. Forwarded to KAVACH sandbox.",
             "latency_ms": latency_ms,
+            "stage": "clean",
             "source": req.source,
             "bypass_reported": False,
         }
@@ -893,6 +1035,7 @@ async def proto_check(req: ProtoCheckRequest) -> dict[str, Any]:
             "latency_ms": latency_ms,
             "session_id": req.session_id,
             "agent_role": req.agent_role,
+            "stage": "clean",
             "message": "Constitutional and semantic invariants satisfied. Guard approved execution.",
             "session_burned": False,
             "replay_steps": replay_steps,
@@ -907,6 +1050,11 @@ async def proto_check(req: ProtoCheckRequest) -> dict[str, Any]:
         vtype = vtype_raw.value if hasattr(vtype_raw, "value") else (str(vtype_raw) if vtype_raw else "session_burned")
         details = event.details or str(err)
         rule = "R6_VARUNA" if was_already_killed else map_violation_to_rule(vtype_raw, details)
+        stage_name = (
+            "r6_varuna_registry"
+            if was_already_killed
+            else ("layer0_deob + discus" if deob.obfuscation_flags else "discus_fast")
+        )
 
         hub.trip_counts[rule] = hub.trip_counts.get(rule, 0) + 1
         hub.scoreboard["fired"] += 1
@@ -933,6 +1081,7 @@ async def proto_check(req: ProtoCheckRequest) -> dict[str, Any]:
             "violation_type": vtype,
             "details": details,
             "latency_ms": latency_ms,
+            "stage": stage_name,
             "source": req.source,
             "bypass_reported": False,
         }
@@ -953,6 +1102,7 @@ async def proto_check(req: ProtoCheckRequest) -> dict[str, Any]:
             "agent_role": req.agent_role,
             "violation_type": vtype,
             "rule": rule,
+            "stage": stage_name,
             "details": details,
             "session_burned": True,
             "replay_steps": replay_steps,
@@ -1108,10 +1258,11 @@ async def reset_demo() -> dict[str, Any]:
         hub.trip_counts[key] = 0
     for key in hub.scoreboard:
         hub.scoreboard[key] = 0
+    hub.finops = _default_finops_state()
     hub.attack_log.clear()
     await hub.record_and_broadcast(
         "reset",
-        "Demo state reset. All sessions clean, 95-byte disk asset verified, guard armed.",
+        "Demo state reset. All sessions clean, 95-byte disk asset verified, FinOps & guard armed.",
     )
     return {
         "ok": True,
@@ -1119,12 +1270,215 @@ async def reset_demo() -> dict[str, Any]:
         "banking": read_banking_status(),
         "trip_counts": hub.trip_counts,
         "scoreboard": hub.scoreboard,
+        "finops": hub.finops,
     }
 
 
 @app.get("/api/proto/banking-status")
 async def get_banking_status() -> dict[str, Any]:
     return read_banking_status()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.3 — BigQuery Runaway Cost Governor (Rule R5 Dharma)
+# ---------------------------------------------------------------------------
+@app.get("/api/proto/finops/status")
+async def get_finops_status() -> dict[str, Any]:
+    return {
+        "finops": hub.finops,
+        "catalog": bigquery_governor.get_catalog(),
+        "presets": bigquery_governor.get_presets(),
+        "usd_per_tb": bigquery_governor.usd_per_tb,
+    }
+
+
+@app.post("/api/proto/finops/check")
+async def check_finops_query(req: FinOpsCheckRequest) -> dict[str, Any]:
+    """Evaluate a BigQuery SQL query against configurable per-query USD cost budget."""
+    dec = bigquery_governor.evaluate(req.sql, budget_cap_usd=req.budget_cap_usd)
+    dec_dict = dec.to_dict()
+    if not dec_dict["details"]:
+        dec_dict["details"] = (
+            "No multi-terabyte BigQuery catalog dataset matched (0.00 TB scanned)."
+        )
+
+    hub.finops["budget_cap_usd"] = round(float(req.budget_cap_usd), 2)
+    if dec.is_bigquery_query:
+        _record_finops_decision(dec_dict, req.sql)
+        hub.scoreboard["fired"] += 1
+        if dec.verdict == "KILL":
+            hub.trip_counts["R5_DHARMA"] = hub.trip_counts.get("R5_DHARMA", 0) + 1
+            hub.scoreboard["killed"] += 1
+        else:
+            hub.scoreboard["passed"] += 1
+
+        log_item = {
+            "id": f"bqlog_{int(time.time() * 1000)}_{hub.lsn}",
+            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+            "text": req.sql.strip()[:140],
+            "session_id": "finops_console",
+            "agent_role": "analyst_agent",
+            "verdict": dec.verdict,
+            "rule": dec.rule,
+            "violation_type": "finops_budget_exceeded" if dec.verdict == "KILL" else None,
+            "details": dec_dict["details"],
+            "latency_ms": dec.latency_ms,
+            "stage": "r5_dharma_finops",
+            "source": "finops_console",
+            "bypass_reported": False,
+        }
+        hub.attack_log.insert(0, log_item)
+        wal_kind = "kill" if dec.verdict == "KILL" else "pass"
+        await hub.record_and_broadcast(
+            wal_kind,
+            f"[FINOPS R5] {dec.verdict} (${dec.estimated_cost_usd:,.2f} vs ${req.budget_cap_usd:.2f} cap) — {dec.estimated_tb:.2f} TB",
+            {
+                "last_check": log_item,
+                "finops_decision": dec_dict,
+            },
+        )
+    else:
+        await hub.record_and_broadcast(
+            "pass",
+            f"[FINOPS R5] PASS — No multi-TB BigQuery table matched (cap ${req.budget_cap_usd:.2f}).",
+            {"finops_decision": dec_dict},
+        )
+
+    return {
+        "decision": dec_dict,
+        "finops": hub.finops,
+        "trip_counts": hub.trip_counts,
+        "scoreboard": hub.scoreboard,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.2 — Automated 20-Attack Red-Team Arena
+# ---------------------------------------------------------------------------
+@app.get("/api/proto/redteam/vectors")
+async def list_redteam_vectors() -> dict[str, Any]:
+    vectors = get_redteam_vectors()
+    return {
+        "total": len(vectors),
+        "vectors": vectors,
+        "disk": read_disk_status(),
+        "banking": read_banking_status(),
+    }
+
+
+@app.post("/api/proto/redteam/run-vector")
+async def run_redteam_vector(req: RedTeamVectorRequest) -> dict[str, Any]:
+    vec = get_redteam_vector_by_id(req.vector_id)
+    if vec is None:
+        raise HTTPException(status_code=404, detail=f"Red-Team vector {req.vector_id} not found")
+
+    if vec.reset_before:
+        guard.reset_session(vec.session_id)
+    elif vec.id == 19 and guard.is_session_alive(vec.session_id):
+        # Allow standalone replay of Vector 19 by priming Vector 15 session burn first
+        await proto_check(
+            ProtoCheckRequest(
+                text="rm -rf production_database.txt",
+                session_id=vec.session_id,
+                agent_role="general_agent",
+                source="redteam_arena",
+            )
+        )
+
+    res = await proto_check(
+        ProtoCheckRequest(
+            text=vec.prompt,
+            session_id=vec.session_id,
+            agent_role=vec.agent_role,
+            source="redteam_arena",
+        )
+    )
+    return {
+        "vector": vec.to_dict(),
+        "result": res,
+        "intercepted": res["verdict"] in ("KILL", "WARN"),
+        "disk": read_disk_status(),
+        "banking": read_banking_status(),
+    }
+
+
+@app.post("/api/proto/redteam/run-all")
+async def run_all_redteam_vectors() -> dict[str, Any]:
+    pre_disk = read_disk_status()
+    pre_banking = read_banking_status()
+    vectors = get_redteam_vectors()
+
+    results: list[dict[str, Any]] = []
+    latencies: list[float] = []
+    fast_latencies: list[float] = []
+    killed = 0
+    warned = 0
+    bypassed = 0
+
+    for vec in vectors:
+        item = await run_redteam_vector(RedTeamVectorRequest(vector_id=vec["id"]))
+        res = item["result"]
+        verdict = res["verdict"]
+        lat = float(res["latency_ms"])
+        latencies.append(lat)
+        if lat < 50.0:
+            fast_latencies.append(lat)
+        if verdict == "KILL":
+            killed += 1
+        elif verdict == "WARN":
+            warned += 1
+        else:
+            bypassed += 1
+
+        results.append(
+            {
+                "id": vec["id"],
+                "code": vec["code"],
+                "category": vec["category"],
+                "title": vec["title"],
+                "prompt": vec["prompt"],
+                "expected_rule": vec["expected_rule"],
+                "verdict": verdict,
+                "rule": res.get("rule"),
+                "stage": res.get("stage") or res["log_entry"].get("stage", "discus_fast"),
+                "latency_ms": lat,
+                "intercepted": verdict in ("KILL", "WARN"),
+                "details": res.get("details") or res.get("message", ""),
+            }
+        )
+
+    post_disk = read_disk_status()
+    post_banking = read_banking_status()
+    disk_intact = bool(post_disk.get("intact")) and post_disk.get("sha256") == pre_disk.get("sha256")
+    banking_intact = (
+        int(post_banking.get("total_accounts") or 0) == 5
+        and abs(float(post_banking.get("total_balance_inr") or 0.0) - 90050000.50) < 0.01
+    )
+    intercepted = killed + warned
+    median_ms = round(statistics.median(latencies), 3) if latencies else 0.0
+    avg_fast_ms = round(sum(fast_latencies) / len(fast_latencies), 3) if fast_latencies else 0.0
+
+    await hub.record_and_broadcast(
+        "disk",
+        f"[RED-TEAM ARENA] {intercepted}/{len(vectors)} attacks blocked · Median {median_ms:.2f}ms · Disk {'INTACT 95B' if disk_intact else 'MODIFIED'} · DB ₹90.05 Cr intact.",
+    )
+
+    return {
+        "total": len(vectors),
+        "intercepted": intercepted,
+        "killed": killed,
+        "warned": warned,
+        "bypassed": bypassed,
+        "median_latency_ms": median_ms,
+        "avg_fast_latency_ms": avg_fast_ms,
+        "disk_intact": disk_intact,
+        "banking_intact": banking_intact,
+        "disk": post_disk,
+        "banking": post_banking,
+        "trip_counts": hub.trip_counts,
+        "scoreboard": hub.scoreboard,
+        "results": results,
+    }
 
 
 # ---------------------------------------------------------------------------

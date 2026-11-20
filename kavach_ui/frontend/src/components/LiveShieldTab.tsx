@@ -69,6 +69,7 @@ const VEDIC_RULES = [
   { key: "R10_INDRA", label: "R10 Indra", desc: "Destructive OS / SQL" },
   { key: "R2_YAMA", label: "R2 Yama", desc: "Agent Role Scope" },
   { key: "R6_VARUNA", label: "R6 Varuṇa", desc: "Session Burn Lock" },
+  { key: "R5_DHARMA", label: "R5 Dharma", desc: "BigQuery FinOps Cap" },
 ] as const;
 
 interface LiveShieldTabProps {
@@ -314,8 +315,8 @@ export function LiveShieldTab({
         </div>
       )}
 
-      {/* 5 Minimal Vedic Invariant Pills */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+      {/* 6 Minimal Vedic Invariant Pills */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         {VEDIC_RULES.map((rule) => {
           const count = tripCounts[rule.key] ?? 0;
           const isVaruna = rule.key === "R6_VARUNA";

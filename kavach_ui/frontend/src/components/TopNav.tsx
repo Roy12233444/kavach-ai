@@ -2,6 +2,8 @@ import {
   Activity,
   Bell,
   BellOff,
+  Crosshair,
+  DollarSign,
   GitCompare,
   HardDrive,
   QrCode,
@@ -26,9 +28,11 @@ interface TopNavProps {
 
 const TABS: { key: TabKey; label: string; icon: typeof ShieldCheck }[] = [
   { key: "shield", label: "Live Shield", icon: ShieldCheck },
-  { key: "proof", label: "Physical Proof", icon: HardDrive },
-  { key: "compare", label: "Before vs. After", icon: GitCompare },
-  { key: "logs", label: "Live Logs", icon: ScrollText },
+  { key: "proof", label: "Proof", icon: HardDrive },
+  { key: "compare", label: "Compare", icon: GitCompare },
+  { key: "redteam", label: "Red-Team 20", icon: Crosshair },
+  { key: "finops", label: "FinOps R5", icon: DollarSign },
+  { key: "logs", label: "Logs", icon: ScrollText },
 ];
 
 export function TopNav({
@@ -79,7 +83,7 @@ export function TopNav({
                 key={key}
                 type="button"
                 onClick={() => onSelectTab(key)}
-                className={`inline-flex items-center gap-1.5 h-7 px-3 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-all cursor-pointer ${
+                className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-all cursor-pointer ${
                   active
                     ? "bg-white text-slate-900 font-semibold shadow-xs ring-1 ring-slate-200/70"
                     : "text-slate-600 hover:text-slate-900 hover:bg-white/60"
